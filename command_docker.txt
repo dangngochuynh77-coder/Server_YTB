@@ -1,0 +1,4 @@
+docker stop youtube-api-container
+docker rm youtube-api-container
+docker build -t youtube-api .
+docker run -d -p 8000:8000 --name youtube-api-container youtube-api

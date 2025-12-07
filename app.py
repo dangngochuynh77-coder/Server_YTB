@@ -127,21 +127,87 @@ def proxy_audio():
     src = AUDIO_CACHE[uid]
     LAST_ACCESS[uid] = time.time()
     
-    def gen():
-        cmd = ["ffmpeg", "-i", src, "-vn", "-acodec", "libmp3lame", 
-               "-b:a", AUDIO_BITRATE, "-ac", AUDIO_CHANNELS, 
-               "-ar", AUDIO_SAMPLERATE, "-f", "mp3", "pipe:1"]
-        try:
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            while True:
-                d = p.stdout.read(2048)
-                if not d: break
-                yield d
-                time.sleep(0.05)
-        except Exception as e:
-            print(f"[ERROR] FFmpeg failed: {str(e)}")
+    # Lấy Range header từ ESP32 (nếu có)
+    range_header = request.headers.get('Range')
     
-    return Response(gen(), mimetype="audio/mpeg")
+    # ✅ GIẢI PHÁP: Convert sang MP3 bằng FFmpeg VÀ buffer toàn bộ để có Content-Length
+    try:
+        print(f"[PROXY_AUDIO] Converting to MP3: {uid}")
+        
+        # FFmpeg command: YouTube URL → MP3 (mono, 44.1kHz, 64kbps)
+        cmd = [
+            "ffmpeg", 
+            "-i", src,              # Input: YouTube URL
+            "-vn",                  # Không video
+            "-acodec", "libmp3lame", # MP3 codec
+            "-b:a", AUDIO_BITRATE,  # 64kbps
+            "-ac", AUDIO_CHANNELS,  # Mono (1 channel)
+            "-ar", AUDIO_SAMPLERATE, # 44.1kHz
+            "-f", "mp3",            # Format MP3
+            "pipe:1"                # Output to stdout
+        ]
+        
+        # Chạy FFmpeg và buffer toàn bộ output
+        print(f"[FFMPEG] Starting conversion...")
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE
+        )
+        
+        # Đọc toàn bộ MP3 data vào RAM
+        mp3_data, stderr = process.communicate(timeout=60)  # Timeout 60s
+        
+        if process.returncode != 0:
+            print(f"[ERROR] FFmpeg failed: {stderr.decode()}")
+            return jsonify({"error": "ffmpeg_error"}), 500
+        
+        total_size = len(mp3_data)
+        print(f"[FFMPEG] Conversion complete: {total_size} bytes")
+        
+        # Xử lý Range request (nếu ESP32 yêu cầu resume)
+        if range_header:
+            # Parse Range header: "bytes=start-end"
+            import re
+            match = re.match(r'bytes=(\d+)-(\d*)', range_header)
+            if match:
+                start = int(match.group(1))
+                end = int(match.group(2)) if match.group(2) else total_size - 1
+                
+                print(f"[RANGE] Serving bytes {start}-{end}/{total_size}")
+                
+                # Trả về partial content
+                return Response(
+                    mp3_data[start:end+1],
+                    status=206,
+                    headers={
+                        'Content-Type': 'audio/mpeg',
+                        'Content-Length': str(end - start + 1),
+                        'Content-Range': f'bytes {start}-{end}/{total_size}',
+                        'Accept-Ranges': 'bytes'
+                    }
+                )
+        
+        # Trả về toàn bộ file (200 OK)
+        return Response(
+            mp3_data,
+            status=200,
+            headers={
+                'Content-Type': 'audio/mpeg',
+                'Content-Length': str(total_size),
+                'Accept-Ranges': 'bytes'
+            }
+        )
+        
+    except subprocess.TimeoutExpired:
+        process.kill()
+        print(f"[ERROR] FFmpeg timeout after 60s")
+        return jsonify({"error": "timeout"}), 504
+    except Exception as e:
+        print(f"[ERROR] Proxy failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "proxy_error", "message": str(e)}), 500
 
 @app.route("/proxy_lyric")
 @limiter.limit("30 per minute")
