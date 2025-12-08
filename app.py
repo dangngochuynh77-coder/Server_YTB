@@ -127,13 +127,10 @@ def proxy_audio():
     src = AUDIO_CACHE[uid]
     LAST_ACCESS[uid] = time.time()
     
-    # Lấy Range header từ ESP32 (nếu có)
-    range_header = request.headers.get('Range')
+    # ✅ ĐƠN GIẢN: Chỉ streaming, KHÔNG Content-Length
+    print(f"[PROXY_AUDIO] Starting stream for: {uid}")
     
-    # ✅ GIẢI PHÁP: Convert sang MP3 bằng FFmpeg VÀ buffer toàn bộ để có Content-Length
     try:
-        print(f"[PROXY_AUDIO] Converting to MP3: {uid}")
-        
         # FFmpeg command: YouTube URL → MP3 (mono, 44.1kHz, 64kbps)
         cmd = [
             "ffmpeg", 
@@ -147,67 +144,44 @@ def proxy_audio():
             "pipe:1"                # Output to stdout
         ]
         
-        # Chạy FFmpeg và buffer toàn bộ output
-        print(f"[FFMPEG] Starting conversion...")
+        print(f"[FFMPEG] Starting realtime streaming...")
         process = subprocess.Popen(
             cmd, 
             stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE
+            stderr=subprocess.DEVNULL
         )
         
-        # Đọc toàn bộ MP3 data vào RAM
-        mp3_data, stderr = process.communicate(timeout=60)  # Timeout 60s
-        
-        if process.returncode != 0:
-            print(f"[ERROR] FFmpeg failed: {stderr.decode()}")
-            return jsonify({"error": "ffmpeg_error"}), 500
-        
-        total_size = len(mp3_data)
-        print(f"[FFMPEG] Conversion complete: {total_size} bytes")
-        
-        # Xử lý Range request (nếu ESP32 yêu cầu resume)
-        if range_header:
-            # Parse Range header: "bytes=start-end"
-            import re
-            match = re.match(r'bytes=(\d+)-(\d*)', range_header)
-            if match:
-                start = int(match.group(1))
-                end = int(match.group(2)) if match.group(2) else total_size - 1
+        def generate():
+            """Vừa tải - Vừa convert - Vừa stream"""
+            try:
+                total_sent = 0
+                while True:
+                    chunk = process.stdout.read(8192)  # Đọc 8KB/lần
+                    if not chunk:
+                        break
+                    total_sent += len(chunk)
+                    yield chunk
                 
-                print(f"[RANGE] Serving bytes {start}-{end}/{total_size}")
-                
-                # Trả về partial content
-                return Response(
-                    mp3_data[start:end+1],
-                    status=206,
-                    headers={
-                        'Content-Type': 'audio/mpeg',
-                        'Content-Length': str(end - start + 1),
-                        'Content-Range': f'bytes {start}-{end}/{total_size}',
-                        'Accept-Ranges': 'bytes'
-                    }
-                )
+                print(f"[STREAMING] Complete: {total_sent} bytes ({total_sent/1024/1024:.2f}MB)")
+            finally:
+                process.stdout.close()
+                process.wait()
         
-        # Trả về toàn bộ file (200 OK)
+        # ✅ Trả về streaming response (KHÔNG có Content-Length)
         return Response(
-            mp3_data,
+            generate(),
             status=200,
             headers={
                 'Content-Type': 'audio/mpeg',
-                'Content-Length': str(total_size),
-                'Accept-Ranges': 'bytes'
+                'Cache-Control': 'no-cache'
             }
         )
         
-    except subprocess.TimeoutExpired:
-        process.kill()
-        print(f"[ERROR] FFmpeg timeout after 60s")
-        return jsonify({"error": "timeout"}), 504
     except Exception as e:
-        print(f"[ERROR] Proxy failed: {str(e)}")
+        print(f"[ERROR] Streaming failed: {str(e)}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": "proxy_error", "message": str(e)}), 500
+        return jsonify({"error": "streaming_error", "message": str(e)}), 500
 
 @app.route("/proxy_lyric")
 @limiter.limit("30 per minute")
