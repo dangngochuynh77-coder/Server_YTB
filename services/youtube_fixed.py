@@ -13,13 +13,7 @@ def yt_search(query):
         }
     }
     
-    # Thử các format từ đơn giản đến phức tạp
-    formats = [
-        "bestaudio*",       # Standard format
-        "bestaudio",        # Wildcard - lấy best available
-        "ba",               # Shorthand
-        "worstaudio"        # Fallback cuối cùng
-    ]   
+    formats = ["bestaudio*", "bestaudio", "ba", "worstaudio"]   
     info = None
     
     for f in formats:
@@ -29,12 +23,10 @@ def yt_search(query):
                 r = y.extract_info(query, download=False)
             info = r["entries"][0] if "entries" in r else r
             
-            # Kiểm tra có URL không
             if info and info.get("url"):
                 print(f"[yt_search] Success with format: {f}")
                 break
             else:
-                print(f"[yt_search] Format {f} returned no URL")
                 info = None
         except Exception as e:
             print(f"[yt_search] Format {f} failed: {str(e)}")
@@ -42,6 +34,16 @@ def yt_search(query):
     
     if not info: return None
     
+    # --- LOGIC THUMBNAIL ---
+    # yt-dlp thường trả về key 'thumbnail' (ảnh độ phân giải cao nhất).
+    # Chúng ta đảm bảo key này tồn tại để app.py dùng.
+    if "thumbnail" not in info and "thumbnails" in info:
+        # Nếu không có key thumbnail trực tiếp, lấy cái cuối cùng trong list (thường là to nhất)
+        try:
+            info["thumbnail"] = info["thumbnails"][-1]["url"]
+        except:
+            info["thumbnail"] = None
+
     # Tìm subtitle/caption
     caps = {}
     caps.update(info.get("automatic_captions", {}))
